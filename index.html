@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Visdil Ventures · Import Cost Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- ================= AUTH ================= -->
+<div id="authView" class="auth-wrap" style="display:none">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <div class="logo big">VV</div>
+      <h1>Visdil Ventures Private Limited</h1>
+      <p>Import Cost Studio</p>
+    </div>
+    <div id="cfgNotice" class="cfg-notice" style="display:none">
+      ⚠️ Supabase is not configured yet. Edit <code>js/config.js</code> with your project URL and anon key.
+    </div>
+    <div class="fld"><label>Email</label><input type="email" id="loginEmail" autocomplete="username"></div>
+    <div class="fld"><label>Password</label><input type="password" id="loginPass" autocomplete="current-password"></div>
+    <div id="authErr" class="auth-err" style="display:none"></div>
+    <button class="btn-primary wide" id="loginBtn" onclick="doLogin()">Sign in</button>
+    <p class="auth-foot">Accounts are created by your administrator.</p>
+  </div>
+</div>
+
+<!-- ================= APP ================= -->
+<div id="appView" style="display:none">
+
+<div class="nav"><div class="nav-in">
+  <div class="logo">VV</div>
+  <div class="brand">
+    <h1>Visdil Ventures Private Limited</h1>
+    <div class="route" id="headSub">Import Cost Studio</div>
+  </div>
+  <div class="nav-tabs">
+    <button id="navCalc" class="on" onclick="showTab('calc')">Calculator</button>
+    <button id="navList" onclick="showTab('list')">Calculations</button>
+    <button id="navUsers" onclick="showTab('users')" style="display:none">Users</button>
+  </div>
+  <div class="userchip"><span id="userName"></span><span id="roleBadge" class="badge" style="display:none">ADMIN</span></div>
+  <button class="ghost-btn" onclick="doLogout()">Sign out</button>
+</div></div>
+
+<!-- ---------- TAB: CALCULATOR ---------- -->
+<div class="wrap tabpane" id="tab-calc">
+
+  <div class="editing-strip">
+    <span id="editingChip" class="edit-chip">✦ New calculation (not saved yet)</span>
+    <button class="ghost-btn sm" onclick="newCalc()">＋ Start new calculation</button>
+  </div>
+
+  <div class="controls">
+    <div class="seg dark">
+      <button id="tabCN" class="on" onclick="setCountry('china')">🇨🇳 China · USD</button>
+      <button id="tabUK" onclick="setCountry('uk')">🇬🇧 UK · GBP</button>
+    </div>
+    <div class="seg">
+      <button id="modeS" class="on" onclick="setMode('single')">Single product</button>
+      <button id="modeM" onclick="setMode('multi')">Multiple products</button>
+    </div>
+    <div class="seg">
+      <button id="incFOB" onclick="setInc('FOB')">FOB</button>
+      <button id="incEXW" onclick="setInc('EXW')">EXW</button>
+    </div>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="dot"></span><h2>Shipment details</h2><span class="hint">All fields editable</span></div>
+    <div class="sec-body">
+      <div class="grid">
+        <div class="fld"><label>Report / Consignment name *</label><input class="name-in" id="repName" oninput="S.repName=this.value"></div>
+        <div class="fld"><label>Date</label><input type="date" id="repDate" onchange="S.date=this.value"></div>
+        <div class="fld"><label>No. of BLs</label><input type="number" id="bls" value="1" min="1" step="1" oninput="S.bls=+this.value||1;calc()"></div>
+        <div class="fld" id="fxUsdWrap"><label>USD → INR</label><input type="number" id="fxUsd" value="100" step="0.01" oninput="S.fxUsd=+this.value||0;calc()"><div class="unit">verify today's rate</div></div>
+        <div class="fld"><label>GBP → INR</label><input type="number" id="fxGbp" value="130" step="0.01" oninput="S.fxGbp=+this.value||0;calc()"><div class="unit">verify today's rate</div></div>
+        <div class="fld"><label>Duty rate (consignment) %</label><input type="number" id="dutyPct" value="9" step="0.1" oninput="S.dutyPct=+this.value||0;calc()"><div class="unit">override per product if needed</div></div>
+        <div class="fld"><label>GST (IGST) %</label><input type="number" id="gstPct" value="18" step="0.1" oninput="S.gstPct=+this.value||0;calc()"><div class="unit">shown separately, not in landed cost</div></div>
+        <div class="fld" id="occManualWrap" style="display:none"><label>Origin charges — China EXW (USD)</label><input type="number" id="occManual" value="0" step="0.01" min="0" oninput="S.occManual=+this.value||0;calc()"><div class="unit">manual input from supplier / forwarder</div></div>
+      </div>
+
+      <details class="rates">
+        <summary>Rates &amp; charge settings — freight, OCC slabs, destination, transport</summary>
+        <div class="grid">
+          <div class="rate-group">Freight</div>
+          <div class="fld"><label>China freight / CBM (USD)</label><input type="number" id="rFrCN" value="10" step="0.5" oninput="R.frCN=+this.value||0;calc()"></div>
+          <div class="fld"><label>UK freight / CBM (GBP)</label><input type="number" id="rFrUK" value="35" step="0.5" oninput="R.frUK=+this.value||0;calc()"></div>
+          <div class="rate-group">Origin clearance slabs — UK (GBP)</div>
+          <div class="fld"><label>Flat ≤ 3 CBM</label><input type="number" id="rOccFlat" value="200" oninput="R.occFlat=+this.value||0;calc()"></div>
+          <div class="fld"><label>3.1 – 6 CBM (per CBM)</label><input type="number" id="rOcc36" value="80" oninput="R.occ36=+this.value||0;calc()"></div>
+          <div class="fld"><label>6.1 – 12 CBM (per CBM)</label><input type="number" id="rOcc612" value="75" oninput="R.occ612=+this.value||0;calc()"></div>
+          <div class="fld"><label>&gt; 12 CBM (per CBM)</label><input type="number" id="rOcc12p" value="70" oninput="R.occ12p=+this.value||0;calc()"></div>
+          <div class="rate-group">Destination (INR)</div>
+          <div class="fld"><label>LCL / CBM</label><input type="number" id="rLcl" value="500" oninput="R.lcl=+this.value||0;calc()"></div>
+          <div class="fld"><label>DO / BL</label><input type="number" id="rDoBl" value="1500" oninput="R.doBl=+this.value||0;calc()"></div>
+          <div class="fld"><label>CFS / CBM (&lt; 10 CBM)</label><input type="number" id="rCfsLo" value="2000" oninput="R.cfsLo=+this.value||0;calc()"></div>
+          <div class="fld"><label>CFS / CBM (≥ 10 CBM)</label><input type="number" id="rCfsHi" value="1800" oninput="R.cfsHi=+this.value||0;calc()"></div>
+          <div class="fld"><label>Docs / BL</label><input type="number" id="rDocs" value="1500" oninput="R.docs=+this.value||0;calc()"></div>
+          <div class="fld"><label>CHA / BL</label><input type="number" id="rCha" value="4500" oninput="R.cha=+this.value||0;calc()"></div>
+          <div class="rate-group">Transport slabs (INR, by total CBM)</div>
+          <div class="fld"><label>≤ 5 CBM</label><input type="number" id="rT5" value="5000" oninput="R.t5=+this.value||0;calc()"></div>
+          <div class="fld"><label>≤ 8 CBM</label><input type="number" id="rT8" value="8000" oninput="R.t8=+this.value||0;calc()"></div>
+          <div class="fld"><label>≤ 10 CBM</label><input type="number" id="rT10" value="12000" oninput="R.t10=+this.value||0;calc()"></div>
+          <div class="fld"><label>≤ 16 CBM</label><input type="number" id="rT16" value="15000" oninput="R.t16=+this.value||0;calc()"></div>
+          <div class="fld"><label>&gt; 16 CBM</label><input type="number" id="rT16p" value="20000" oninput="R.t16p=+this.value||0;calc()"></div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="dot"></span><h2>Products</h2><span class="hint" id="curHint"></span></div>
+    <div class="sec-body">
+      <div id="prodList"></div>
+      <button class="addbtn" id="addBtn" onclick="addProduct()" style="display:none">＋ Add product to consignment</button>
+    </div>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<!-- ---------- TAB: CALCULATIONS LIST ---------- -->
+<div class="wrap tabpane" id="tab-list" style="display:none">
+  <div class="sec">
+    <div class="sec-head"><span class="dot"></span><h2>All calculations</h2>
+      <input class="search" id="searchBox" placeholder="Search by report name…" oninput="renderList()">
+    </div>
+    <div class="sec-body tbl-scroll">
+      <table class="rt" id="listTable"></table>
+      <div id="listEmpty" class="note" style="display:none">No calculations yet. Create one in the Calculator tab and press Save.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ---------- TAB: USERS (admin) ---------- -->
+<div class="wrap tabpane" id="tab-users" style="display:none">
+  <div class="sec">
+    <div class="sec-head"><span class="dot"></span><h2>Create login</h2><span class="hint">New users can sign in immediately</span></div>
+    <div class="sec-body">
+      <div class="grid">
+        <div class="fld"><label>Full name</label><input class="name-in" id="nuName"></div>
+        <div class="fld"><label>Email</label><input type="email" id="nuEmail"></div>
+        <div class="fld"><label>Password</label><input type="text" id="nuPass" placeholder="min 6 characters"></div>
+        <div class="fld"><label>Role</label><select id="nuRole"><option value="user">User</option><option value="admin">Admin</option></select></div>
+      </div>
+      <button class="btn-primary" style="margin-top:14px" onclick="createUser()">Create user</button>
+      <div id="nuMsg" class="note"></div>
+    </div>
+  </div>
+  <div class="sec">
+    <div class="sec-head"><span class="dot"></span><h2>All users</h2></div>
+    <div class="sec-body tbl-scroll"><table class="rt" id="usersTable"></table></div>
+  </div>
+</div>
+
+<div class="bar" id="calcBar">
+  <span class="sum" id="barSum"></span>
+  <button class="ghost-btn" onclick="saveCalc()">💾 Save</button>
+  <button class="pdfbtn" onclick="makePDF()">Download PDF report</button>
+</div>
+
+</div><!-- /appView -->
+
+<!-- modal + toast -->
+<div class="modal-back" id="modalBack" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-head"><h3 id="modalTitle"></h3><button onclick="closeModal()">✕</button></div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
