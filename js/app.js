@@ -1,5 +1,5 @@
 /* ============================================================
-   Visdil Ventures Private Limited — Import Cost Studio
+   Visdil Ventures Private Limited — Import Cost Studio  (v2)
    Frontend: vanilla JS · Backend: Supabase · Hosting: Netlify
    ============================================================ */
 
@@ -13,14 +13,17 @@ if (cfgOk) sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON
 
 /* ---------------- Calculator state ---------------- */
 const S = { country:'china', mode:'single', inc:'FOB', repName:'', date:new Date().toISOString().slice(0,10),
-            bls:1, fxUsd:100, fxGbp:130, dutyPct:9, gstPct:18, occManual:0, products:[] };
+            bls:1, fxUsd:100, fxGbp:130, dutyPct:9, gstPct:18, occManual:0,
+            quoteRef:'', quoteDate:'', quoteHistory:[], remarks:'', products:[] };
 const R = { frCN:10, frUK:35, occFlat:200, occ36:80, occ612:75, occ12p:70,
             lcl:500, doBl:1500, cfsLo:2000, cfsHi:1800, docs:1500, cha:4500,
             t5:5000, t8:8000, t10:12000, t16:15000, t16p:20000 };
 const R_DEFAULTS = {...R};
 let pid = 0;
-let currentCalc = null;      // DB row currently being edited
-let allCalcs = [];           // cache for list tab
+let currentCalc = null;      // DB row currently open
+let viewOnly = false;        // open in read-only (shared/public, not owner, not admin)
+let allCalcs = [];
+let shareCtx = null;         // {id, name} for the share modal
 
 const newProduct = () => ({ id:++pid, name:'', price:0, qty:1, cbm:0, duty:'', muType:'pct', muVal:0, dsType:'pct', dsVal:0 });
 S.products.push(newProduct());
@@ -35,7 +38,9 @@ const f0 = n => Math.round(isFinite(n)?n:0).toLocaleString('en-IN');
 const f2 = n => (isFinite(n)?n:0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const inr = n => '₹' + f0(n);
 const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
+const rnd = n => Math.round(isFinite(n)?n:0);
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2800); }
+const canEditRow = row => myProfile && (myProfile.role==='admin' || row.owner===me.id);
 
 function occCalc(cbm){
   if(cbm<=0) return 0;
@@ -103,7 +108,7 @@ function compute(){
   return { rows, totCbm, exw, frRate, frOrig, frInr, occOrig, occInr, d,
     tot:{ valCur:T('valCur'), valInr:T('valInr'), av:T('av'), duty:T('duty'), gstBase:T('gstBase'), gst:T('gst'),
           dutyPayable:T('dutyPayable'), landed:T('landed'), offer1:T('offer1'), prof1:T('prof1'),
-          offer2:T('offer2'), prof2:T('prof2') } };
+          ds:T('ds'), offer2:T('offer2'), prof2:T('prof2') } };
 }
 
 /* ---------------- Controls ---------------- */
@@ -182,9 +187,17 @@ function renderProducts(){
 function calc(){
   const C = compute(), exw = C.exw, s = sym();
   const nm = (r,i)=> r.p.name || 'Product '+(i+1);
+  const hasData = C.tot.landed > 0.5;
+
+  if(!hasData){
+    $('kpis').innerHTML = '';
+    $('results').innerHTML = '<div class="sec"><div class="empty-calc">Enter product price and CBM to see the landed cost, offers and full calculation.</div></div>';
+    $('barSum').innerHTML = '';
+    return;
+  }
 
   $('kpis').innerHTML = `
-    <div class="kpi hero"><div class="kl">Total landed cost</div><div class="kv">${inr(C.tot.landed)}</div><div class="ks">GST excluded · ${C.totCbm?f2(C.totCbm):'0'} CBM</div></div>
+    <div class="kpi hero"><div class="kl">Total landed cost</div><div class="kv">${inr(C.tot.landed)}</div><div class="ks">GST excluded · ${f2(C.totCbm)} CBM</div></div>
     <div class="kpi"><div class="kl">Duty payable</div><div class="kv">${inr(C.tot.dutyPayable)}</div><div class="ks">Duty ${inr(C.tot.duty)} + IGST ${inr(C.tot.gst)}</div></div>
     <div class="kpi"><div class="kl">Offer 1</div><div class="kv">${inr(C.tot.offer1)}</div><div class="ks">Profit ${inr(C.tot.prof1)}</div></div>
     <div class="kpi"><div class="kl">Final offer</div><div class="kv">${inr(C.tot.offer2)}</div><div class="ks">Profit ${inr(C.tot.prof2)} (${f2(C.tot.landed>0?C.tot.prof2/C.tot.landed*100:0)}%)</div></div>`;
@@ -291,7 +304,7 @@ async function enterApp(session){
   showTab('calc');
 }
 function showAuth(){
-  me = null; myProfile = null; currentCalc = null;
+  me = null; myProfile = null; currentCalc = null; viewOnly = false;
   $('appView').style.display='none'; $('authView').style.display='';
   if(!cfgOk) $('cfgNotice').style.display='';
 }
@@ -311,23 +324,76 @@ function showTab(t){
 }
 
 /* ============================================================
-   SAVE / LOAD / LIST
+   QUOTE REFERENCE HISTORY
+   ============================================================ */
+function renderQrefHist(){
+  const h = S.quoteHistory||[];
+  $('qrefHist').innerHTML = !h.length
+    ? '<span class="note">No references recorded yet — history builds automatically each time you save with a new reference.</span>'
+    : h.slice().reverse().map(q=>`
+        <div class="qh-item"><b>${esc(q.ref)}</b>
+          <span class="qh-meta">ref date: ${esc(q.date||'—')}</span>
+          <span class="qh-meta">recorded: ${new Date(q.at).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'})} · ${esc(q.by||'')}</span>
+        </div>`).join('');
+}
+
+/* ============================================================
+   SAVE (Save / Save revision) · LOAD · LIST
    ============================================================ */
 function snapshotData(){ return JSON.parse(JSON.stringify({ S, R })); }
 
 function updateEditingChip(){
-  $('editingChip').innerHTML = currentCalc
-    ? '✎ Editing saved report: <b>'+esc(currentCalc.report_name)+'</b>'
-    : '✦ New calculation (not saved yet)';
+  const btn = $('saveBtn');
+  if(currentCalc && viewOnly){
+    $('editingChip').innerHTML = '👁 Viewing shared report: <b>'+esc(currentCalc.report_name)+'</b> (read-only)';
+    btn.style.display = 'none';
+  } else if(currentCalc){
+    $('editingChip').innerHTML = '✎ Editing saved report: <b>'+esc(currentCalc.report_name)+'</b>';
+    btn.style.display = ''; btn.textContent = '💾 Save revision';
+  } else {
+    $('editingChip').innerHTML = '✦ New calculation (not saved yet)';
+    btn.style.display = ''; btn.textContent = '💾 Save';
+  }
+}
+
+function buildSnapshot(C){
+  const pr = (r,i)=>({ name: r.p.name||('Product '+(i+1)),
+    goods:rnd(r.valInr), origin:rnd(r.occS), freight:rnd(r.frS), av:rnd(r.av),
+    duty:rnd(r.duty), gst:rnd(r.gst), dest:rnd(r.destS), landed:rnd(r.landed),
+    offer1:rnd(r.offer1), discount:rnd(r.ds), final:rnd(r.offer2),
+    profit:rnd(r.prof2), profit_pct:+r.prof2Pct.toFixed(2) });
+  return { products: C.rows.map(pr),
+    totals: { goods:rnd(C.tot.valInr), origin:rnd(C.occInr), freight:rnd(C.frInr), av:rnd(C.tot.av),
+      duty:rnd(C.tot.duty), gst:rnd(C.tot.gst), dest:rnd(C.d.total), landed:rnd(C.tot.landed),
+      offer1:rnd(C.tot.offer1), discount:rnd(C.tot.ds), final:rnd(C.tot.offer2),
+      profit:rnd(C.tot.prof2), profit_pct: C.tot.landed>0 ? +(C.tot.prof2/C.tot.landed*100).toFixed(2) : 0 } };
 }
 
 async function saveCalc(){
+  if(viewOnly){ toast('This report is view-only for you'); return; }
   if(!S.repName.trim()){ toast('Enter a Report / Consignment name first'); $('repName').focus(); return; }
   if(S.products.some(p=>!p.name.trim())){ toast('Every product needs a name before saving'); return; }
+
+  // Mandatory comment
+  let comment;
+  if(currentCalc){
+    comment = (prompt('Revision comment (mandatory)\nDescribe what changed / why:','')||'').trim();
+    if(!comment){ toast('A comment is mandatory to save a revision'); return; }
+  } else {
+    comment = (prompt('Comment for the initial version:','Initial version')||'').trim() || 'Initial version';
+  }
+
+  // Auto-record quote reference history when ref changed
+  const lastQ = (S.quoteHistory||[])[ (S.quoteHistory||[]).length-1 ];
+  if((S.quoteRef||'').trim() && (!lastQ || lastQ.ref!==S.quoteRef || lastQ.date!==S.quoteDate)){
+    S.quoteHistory.push({ ref:S.quoteRef, date:S.quoteDate||'', at:new Date().toISOString(), by:myProfile.email });
+    renderQrefHist();
+  }
+
   const C = compute();
   const payload = {
     report_name: S.repName.trim(), country: S.country, incoterm: S.inc, mode: S.mode,
-    total_landed: Math.round(C.tot.landed), final_offer: Math.round(C.tot.offer2),
+    total_landed: rnd(C.tot.landed), final_offer: rnd(C.tot.offer2),
     data: snapshotData(), updated_at: new Date().toISOString()
   };
   try{
@@ -336,26 +402,31 @@ async function saveCalc(){
       const { data, error } = await sb.from('calculations').update(payload).eq('id', currentCalc.id).select().single();
       if(error) throw error;
       currentCalc = data;
-      await sb.from('edit_logs').insert({ calculation_id: currentCalc.id, editor: me.id,
-        editor_email: myProfile.email, action:'updated', changes: changes.length?changes:['Saved (no field changes detected)'] });
-      toast('Report updated · change logged');
+      await sb.from('edit_logs').insert({ calculation_id: currentCalc.id, editor: me.id, editor_email: myProfile.email,
+        action:'updated', changes: ['Comment: '+comment, ...(changes.length?changes:['No field changes detected'])] });
     } else {
-      const { data, error } = await sb.from('calculations').insert({ ...payload, owner: me.id }).select().single();
+      const { data, error } = await sb.from('calculations').insert({ ...payload, owner: me.id, visibility:'private' }).select().single();
       if(error) throw error;
       currentCalc = data;
-      await sb.from('edit_logs').insert({ calculation_id: currentCalc.id, editor: me.id,
-        editor_email: myProfile.email, action:'created', changes:['Report created'] });
-      toast('Report saved');
+      await sb.from('edit_logs').insert({ calculation_id: currentCalc.id, editor: me.id, editor_email: myProfile.email,
+        action:'created', changes:['Comment: '+comment] });
     }
+    // Every save records a revision with the mandatory comment
+    const { count } = await sb.from('revisions').select('*',{count:'exact',head:true}).eq('calculation_id', currentCalc.id);
+    const revNo = (count||0)+1;
+    await sb.from('revisions').insert({ calculation_id: currentCalc.id, rev_no: revNo, note: comment,
+      snapshot: buildSnapshot(C), created_by: me.id, created_by_email: myProfile.email });
     updateEditingChip();
+    toast(revNo===1 ? 'Report saved · Revision 1 recorded' : 'Revision '+revNo+' saved');
   }catch(e){ console.error(e); toast('Save failed: '+e.message); }
 }
 
 function newCalc(){
-  currentCalc = null;
+  currentCalc = null; viewOnly = false;
   Object.assign(R, R_DEFAULTS);
   Object.assign(S, { country:'china', mode:'single', inc:'FOB', repName:'', date:new Date().toISOString().slice(0,10),
-    bls:1, fxUsd:100, fxGbp:130, dutyPct:9, gstPct:18, occManual:0 });
+    bls:1, fxUsd:100, fxGbp:130, dutyPct:9, gstPct:18, occManual:0,
+    quoteRef:'', quoteDate:'', quoteHistory:[], remarks:'' });
   pid=0; S.products = [newProduct()];
   hydrateInputs();
   setCountry('china'); setMode('single', true);
@@ -367,17 +438,26 @@ function hydrateInputs(){
   $('repName').value=S.repName; $('repDate').value=S.date; $('bls').value=S.bls;
   $('fxUsd').value=S.fxUsd; $('fxGbp').value=S.fxGbp; $('dutyPct').value=S.dutyPct;
   $('gstPct').value=S.gstPct; $('occManual').value=S.occManual;
+  $('qRef').value=S.quoteRef||''; $('qDate').value=S.quoteDate||''; $('remarks').value=S.remarks||'';
+  renderQrefHist();
   const m={rFrCN:'frCN',rFrUK:'frUK',rOccFlat:'occFlat',rOcc36:'occ36',rOcc612:'occ612',rOcc12p:'occ12p',
     rLcl:'lcl',rDoBl:'doBl',rCfsLo:'cfsLo',rCfsHi:'cfsHi',rDocs:'docs',rCha:'cha',
     rT5:'t5',rT8:'t8',rT10:'t10',rT16:'t16',rT16p:'t16p'};
   for(const id in m) $(id).value = R[m[id]];
 }
 
+function openCalcById(id){
+  const row = allCalcs.find(c=>c.id===id);
+  if(row) loadCalc(row);
+}
 function loadCalc(row){
   currentCalc = row;
+  viewOnly = !canEditRow(row);
   const d = row.data;
   Object.assign(R, R_DEFAULTS, d.R||{});
-  Object.assign(S, { country:'china', inc:'FOB', mode:'single', occManual:0 }, d.S||{}, { products: [] });
+  Object.assign(S, { country:'china', inc:'FOB', mode:'single', occManual:0,
+    quoteRef:'', quoteDate:'', quoteHistory:[], remarks:'' }, d.S||{}, { products: [] });
+  if(!Array.isArray(S.quoteHistory)) S.quoteHistory=[];
   pid=0; S.products = (d.S?.products||[]).map(p=>({ ...newProduct(), ...p, id:++pid }));
   if(!S.products.length) S.products=[newProduct()];
   hydrateInputs();
@@ -392,8 +472,9 @@ function diffData(oldD, newD){
   const out = [];
   const so=oldD.S||{}, sn=newD.S||{}, ro=oldD.R||{}, rn=newD.R||{};
   const fields = [['repName','Report name'],['country','Country'],['inc','Incoterm'],['mode','Mode'],['date','Date'],
-    ['bls','No. of BLs'],['fxUsd','USD-INR rate'],['fxGbp','GBP-INR rate'],['dutyPct','Duty %'],['gstPct','GST %'],['occManual','China EXW origin charges']];
-  fields.forEach(([k,l])=>{ if(String(so[k])!==String(sn[k])) out.push(l+': '+so[k]+' → '+sn[k]); });
+    ['bls','No. of BLs'],['fxUsd','USD-INR rate'],['fxGbp','GBP-INR rate'],['dutyPct','Duty %'],['gstPct','GST %'],
+    ['occManual','China EXW origin charges'],['quoteRef','Quote/Email reference'],['quoteDate','Reference date'],['remarks','Remarks']];
+  fields.forEach(([k,l])=>{ if(String(so[k]??'')!==String(sn[k]??'')) out.push(l+': '+(so[k]??'—')+' → '+(sn[k]??'—')); });
   const rlabels = {frCN:'China freight/CBM',frUK:'UK freight/CBM',occFlat:'OCC flat ≤3',occ36:'OCC 3.1-6',occ612:'OCC 6.1-12',occ12p:'OCC >12',
     lcl:'LCL/CBM',doBl:'DO/BL',cfsLo:'CFS <10',cfsHi:'CFS ≥10',docs:'Docs/BL',cha:'CHA/BL',t5:'Transport ≤5',t8:'Transport ≤8',t10:'Transport ≤10',t16:'Transport ≤16',t16p:'Transport >16'};
   for(const k in rlabels){ if(String(ro[k])!==String(rn[k])) out.push(rlabels[k]+': '+ro[k]+' → '+rn[k]); }
@@ -413,34 +494,44 @@ function diffData(oldD, newD){
 
 /* ---- list tab ---- */
 async function loadList(){
-  const sel = myProfile.role==='admin' ? '*, profiles:owner ( email, full_name )' : '*';
-  const { data, error } = await sb.from('calculations').select(sel).order('report_name', { ascending:true });
+  const { data, error } = await sb.from('calculations')
+    .select('*, profiles:owner ( email, full_name ), calculation_shares ( count )')
+    .order('report_name', { ascending:true });
   if(error){ toast('Could not load list: '+error.message); return; }
   allCalcs = data||[];
   renderList();
 }
+function visBadge(c){
+  const shares = c.calculation_shares?.[0]?.count || 0;
+  if(c.visibility==='public') return '<span class="vis pub">🌐 Public</span>';
+  if(shares>0) return '<span class="vis shr">👥 Shared · '+shares+'</span>';
+  return '<span class="vis">🔒 Private</span>';
+}
 function renderList(){
   const q = ($('searchBox').value||'').toLowerCase();
   const rows = allCalcs.filter(c=>c.report_name.toLowerCase().includes(q));
-  const admin = myProfile.role==='admin';
   $('listEmpty').style.display = rows.length ? 'none' : '';
   $('listTable').innerHTML = !rows.length ? '' : `
-    <tr><th>Report name</th>${admin?'<th>Owner</th>':''}<th>Route</th><th class="num">Landed cost</th><th class="num">Final offer</th><th>Updated</th><th>Actions</th></tr>
-    ${rows.map(c=>`
+    <tr><th>Report name</th><th>Owner</th><th>Route</th><th>Visibility</th><th class="num">Landed cost</th><th class="num">Final offer</th><th>Updated</th><th>Actions</th></tr>
+    ${rows.map(c=>{
+      const mine = canEditRow(c);
+      return `
       <tr>
         <td><b>${esc(c.report_name)}</b></td>
-        ${admin?`<td>${esc(c.profiles?.full_name || c.profiles?.email || '—')}</td>`:''}
+        <td>${esc(c.profiles?.full_name || c.profiles?.email || '—')}</td>
         <td>${c.country==='china'?'🇨🇳 China':'🇬🇧 UK'} · ${c.incoterm}</td>
+        <td>${visBadge(c)}</td>
         <td class="num">${inr(c.total_landed)}</td>
         <td class="num">${inr(c.final_offer)}</td>
         <td>${new Date(c.updated_at).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'})}</td>
         <td><div class="row-actions">
-          <button onclick='loadCalc(${JSON.stringify(c).replace(/'/g,"&#39;")})'>Open / Edit</button>
+          <button onclick="openCalcById('${c.id}')">${mine?'Open / Edit':'View'}</button>
+          ${mine?`<button onclick="openShare('${c.id}')">Share</button>`:''}
           <button onclick="viewRevisions('${c.id}','${esc(c.report_name)}')">Revisions</button>
           <button onclick="viewLog('${c.id}','${esc(c.report_name)}')">Edit log</button>
-          <button class="danger" onclick="deleteCalc('${c.id}')">Delete</button>
+          ${mine?`<button class="danger" onclick="deleteCalc('${c.id}')">Delete</button>`:''}
         </div></td>
-      </tr>`).join('')}`;
+      </tr>`;}).join('')}`;
 }
 async function deleteCalc(id){
   if(!confirm('Delete this report and its full history? This cannot be undone.')) return;
@@ -452,47 +543,105 @@ async function deleteCalc(id){
 }
 
 /* ============================================================
-   REVISIONS  (Offer 1 -> Offer 2 -> ...)
+   SHARING (public / private / specific users)
    ============================================================ */
-async function recordRevision(){
-  if(!currentCalc){ toast('Save the report first, then record a revision'); return; }
-  const note = prompt('Note for this revision (e.g. "Offer 2 — after customer negotiation"):','');
-  if(note===null) return;
-  const C = compute();
-  const snapshot = {
-    products: C.rows.map((r,i)=>({ name: r.p.name||('Product '+(i+1)),
-      landed: Math.round(r.landed), markup: Math.round(r.mu), offer1: Math.round(r.offer1),
-      discount: Math.round(r.ds), final_offer: Math.round(r.offer2),
-      profit: Math.round(r.prof2), profit_pct: +r.prof2Pct.toFixed(2) })),
-    totals: { landed: Math.round(C.tot.landed), offer1: Math.round(C.tot.offer1),
-      final_offer: Math.round(C.tot.offer2), profit: Math.round(C.tot.prof2) }
-  };
-  const { count } = await sb.from('revisions').select('*',{count:'exact',head:true}).eq('calculation_id', currentCalc.id);
-  const { error } = await sb.from('revisions').insert({ calculation_id: currentCalc.id, rev_no:(count||0)+1,
-    note, snapshot, created_by: me.id, created_by_email: myProfile.email });
-  if(error){ toast('Could not record revision: '+error.message); return; }
-  toast('Revision '+((count||0)+1)+' recorded');
+async function openShare(calcId){
+  const c = allCalcs.find(x=>x.id===calcId);
+  if(!c) return;
+  shareCtx = { id: calcId, name: c.report_name };
+  await renderShareModal();
+}
+async function renderShareModal(){
+  const { data: c } = await sb.from('calculations').select('*').eq('id', shareCtx.id).single();
+  const [{ data: shares }, { data: users }] = await Promise.all([
+    sb.from('calculation_shares').select('*, profiles:shared_with ( email, full_name )').eq('calculation_id', shareCtx.id),
+    sb.from('profiles').select('id,email,full_name').order('email')
+  ]);
+  const sharedIds = (shares||[]).map(s=>s.shared_with);
+  const candidates = (users||[]).filter(u=>u.id!==c.owner && !sharedIds.includes(u.id));
+  openModal('Sharing — '+shareCtx.name, `
+    <p style="font-size:13px;color:var(--soft);margin-bottom:10px">Private: only you and admins. Public: every user of the app can view. Shared: only the chosen users (plus admins) can view. Viewers cannot edit.</p>
+    <div class="share-row">
+      <button class="ghost-btn ${c.visibility==='private'?'':' '}" style="${c.visibility==='private'?'border-color:var(--acc);color:var(--acc);':''}" onclick="setVisibility('private')">🔒 Private</button>
+      <button class="ghost-btn" style="${c.visibility==='public'?'border-color:var(--good);color:var(--good);':''}" onclick="setVisibility('public')">🌐 Public</button>
+    </div>
+    <div class="share-row">
+      <select id="shareSel">
+        ${candidates.length ? candidates.map(u=>`<option value="${u.id}">${esc(u.full_name||u.email)} — ${esc(u.email)}</option>`).join('') : '<option value="">No more users to add</option>'}
+      </select>
+      <button class="btn-primary" onclick="addShare()" ${candidates.length?'':'disabled'}>Share with user</button>
+    </div>
+    <div class="share-list">
+      ${(shares||[]).length ? shares.map(s=>`
+        <div class="sh-item">👤 ${esc(s.profiles?.full_name || s.profiles?.email || '')}
+          <span style="color:var(--soft);font-size:12px">${esc(s.profiles?.email||'')}</span>
+          <button onclick="removeShare(${s.id})">Remove</button>
+        </div>`).join('') : '<p class="note">Not shared with any specific user yet.</p>'}
+    </div>`);
+}
+async function setVisibility(v){
+  const { error } = await sb.from('calculations').update({ visibility:v }).eq('id', shareCtx.id);
+  if(error){ toast(error.message); return; }
+  toast(v==='public' ? 'Report is now Public — all users can view' : 'Report is now Private');
+  await renderShareModal(); loadList();
+}
+async function addShare(){
+  const uid = $('shareSel').value;
+  if(!uid) return;
+  const { error } = await sb.from('calculation_shares').insert({ calculation_id: shareCtx.id, shared_with: uid, shared_by: me.id });
+  if(error){ toast(error.message); return; }
+  toast('Shared');
+  await renderShareModal(); loadList();
+}
+async function removeShare(shareId){
+  const { error } = await sb.from('calculation_shares').delete().eq('id', shareId);
+  if(error){ toast(error.message); return; }
+  toast('Share removed');
+  await renderShareModal(); loadList();
+}
+
+/* ============================================================
+   REVISIONS — full cost picture per revision
+   ============================================================ */
+const REV_FIELDS = [
+  ['goods','Goods value'], ['origin','Origin charges'], ['freight','Freight'],
+  ['av','Assessment value'], ['duty','Duty'], ['gst','GST (IGST)'],
+  ['dest','Destination charges'], ['landed','Landed cost'],
+  ['offer1','Offer 1'], ['discount','Discount'], ['final','Final offer (Offer 2)'],
+  ['profit','Profit'], ['profit_pct','Profit %']
+];
+function revVal(obj, key){
+  if(!obj) return 0;
+  let v = obj[key];
+  if(v===undefined && key==='final') v = obj.final_offer;   // old snapshots
+  if(v===undefined && key==='discount') v = obj.discount;
+  return v??0;
 }
 async function viewRevisions(calcId, name){
   const { data, error } = await sb.from('revisions').select('*').eq('calculation_id', calcId).order('rev_no',{ascending:false});
   if(error){ toast(error.message); return; }
   openModal('Price revisions — '+name, !data.length
-    ? '<p class="note">No revisions recorded yet. Open the report, adjust markup/discount, then press "Record revision" in the bottom bar of the calculator.</p>'
-    : data.map(r=>`
+    ? '<p class="note">No revisions yet. Open the report, make changes, and press "Save revision".</p>'
+    : data.map(r=>{
+      const prods = r.snapshot.products||[], tot = r.snapshot.totals||{};
+      return `
       <div class="rev-card">
         <div class="rev-top"><span class="rev-no">Revision ${r.rev_no}</span>
           <span class="rev-meta">${new Date(r.created_at).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'})} · ${esc(r.created_by_email||'')}</span>
-          ${r.note?`<span class="rev-meta">· ${esc(r.note)}</span>`:''}</div>
+          ${r.note?`<span class="rev-meta">· “${esc(r.note)}”</span>`:''}</div>
         <div class="tbl-scroll"><table class="rt">
-          <tr><th>Product</th><th class="num">Landed</th><th class="num">Markup</th><th class="num">Offer 1</th><th class="num">Discount</th><th class="num">Final offer</th><th class="num">Profit</th></tr>
-          ${r.snapshot.products.map(p=>`<tr><td>${esc(p.name)}</td><td class="num">${inr(p.landed)}</td><td class="num">${inr(p.markup)}</td>
-            <td class="num">${inr(p.offer1)}</td><td class="num">${inr(p.discount)}</td><td class="num"><b>${inr(p.final_offer)}</b></td>
-            <td class="num ${p.profit>=0?'pos':'neg'}">${inr(p.profit)} (${f2(p.profit_pct)}%)</td></tr>`).join('')}
-          <tr class="tot"><td>Total</td><td class="num">${inr(r.snapshot.totals.landed)}</td><td></td>
-            <td class="num">${inr(r.snapshot.totals.offer1)}</td><td></td><td class="num">${inr(r.snapshot.totals.final_offer)}</td>
-            <td class="num">${inr(r.snapshot.totals.profit)}</td></tr>
+          <tr><th>Particulars</th>${prods.map(p=>'<th class="num">'+esc(p.name)+'</th>').join('')}<th class="num">Total</th></tr>
+          ${REV_FIELDS.map(([k,label])=>`
+            <tr${k==='landed'||k==='final'?' class="tot"':''}>
+              <td>${label}</td>
+              ${prods.map(p=>{
+                const v = revVal(p,k);
+                return '<td class="num">'+(k==='profit_pct' ? f2(v)+'%' : inr(v))+'</td>';
+              }).join('')}
+              <td class="num"><b>${k==='profit_pct' ? f2(revVal(tot,k))+'%' : inr(revVal(tot,k))}</b></td>
+            </tr>`).join('')}
         </table></div>
-      </div>`).join(''));
+      </div>`;}).join(''));
 }
 
 /* ============================================================
@@ -526,13 +675,12 @@ async function createUser(){
   const msg=$('nuMsg');
   if(!email || pass.length<6){ msg.textContent='Enter a valid email and a password of at least 6 characters.'; return; }
   msg.textContent='Creating…';
-  // Use a separate client so the admin's own session is untouched
   const temp = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY,
     { auth: { persistSession:false, autoRefreshToken:false } });
   const { error } = await temp.auth.signUp({ email, password: pass, options:{ data:{ full_name:name } } });
   if(error){ msg.textContent='Failed: '+error.message; return; }
   if(role==='admin'){
-    await new Promise(r=>setTimeout(r,800));   // wait for profile trigger
+    await new Promise(r=>setTimeout(r,800));
     const { error: e2 } = await sb.from('profiles').update({ role:'admin' }).eq('email', email);
     if(e2){ msg.textContent='User created, but promoting to admin failed: '+e2.message; loadUsers(); return; }
   }
@@ -548,7 +696,7 @@ function openModal(title, html){ $('modalTitle').textContent=title; $('modalBody
 function closeModal(){ $('modalBack').style.display='none'; }
 
 /* ============================================================
-   PDF  — professional serif report, company-branded
+   PDF — professional serif report, company-branded
    ============================================================ */
 function makePDF(){
   if(S.products.some(p=>!p.name.trim())){ alert('Please enter a product name for every product before generating the PDF.'); return; }
@@ -564,24 +712,26 @@ function makePDF(){
   let y;
 
   /* ---- header ---- */
-  doc.setFillColor(14,19,48); doc.rect(0,0,W,38,'F');
-  doc.setFillColor(...ACC); doc.rect(0,38,W,1.6,'F');
+  const bandH = 42;
+  doc.setFillColor(14,19,48); doc.rect(0,0,W,bandH,'F');
+  doc.setFillColor(...ACC); doc.rect(0,bandH,W,1.6,'F');
   doc.setTextColor(255); doc.setFont('times','bold'); doc.setFontSize(17);
-  doc.text(COMPANY, M, 15);
+  doc.text(COMPANY, M, 14);
   doc.setFont('times','italic'); doc.setFontSize(10.5); doc.setTextColor(190,196,236);
-  doc.text('Import Landed Cost Report', M, 22.5);
+  doc.text('Import Landed Cost Report', M, 21);
   doc.setFont('times','normal'); doc.setFontSize(9); doc.setTextColor(165,172,214);
-  doc.text(px((isCN()?'China':'United Kingdom')+'  ·  '+S.inc+'  ·  '+cur()+'  »  India (INR)'), M, 29);
-  doc.text(px('Report:  '+(S.repName||'-')), M, 34.5);
+  doc.text(px((isCN()?'China':'United Kingdom')+'  ·  '+S.inc+'  ·  '+cur()+'  »  India (INR)'), M, 27.5);
+  doc.text(px('Report:  '+(S.repName||'-')), M, 33);
+  if((S.quoteRef||'').trim()) doc.text(px('Quote ref:  '+S.quoteRef+(S.quoteDate?('  ('+S.quoteDate+')'):'')), M, 38.5);
   doc.setTextColor(255); doc.setFontSize(9.5);
-  doc.text('Date:  '+S.date, W-M, 15, {align:'right'});
+  doc.text('Date:  '+S.date, W-M, 14, {align:'right'});
   doc.setTextColor(165,172,214); doc.setFontSize(9);
-  doc.text('BLs:  '+S.bls, W-M, 22.5, {align:'right'});
-  doc.text(px((isCN()?('USD-INR '+f2(S.fxUsd)+'     '):'')+'GBP-INR '+f2(S.fxGbp)), W-M, 29, {align:'right'});
-  if(myProfile) doc.text(px('Prepared by:  '+(myProfile.full_name||myProfile.email||'')), W-M, 34.5, {align:'right'});
+  doc.text('BLs:  '+S.bls, W-M, 21, {align:'right'});
+  doc.text(px((isCN()?('USD-INR '+f2(S.fxUsd)+'     '):'')+'GBP-INR '+f2(S.fxGbp)), W-M, 27.5, {align:'right'});
+  if(myProfile) doc.text(px('Prepared by:  '+(myProfile.full_name||myProfile.email||'')), W-M, 33, {align:'right'});
 
   /* ---- KPI cards ---- */
-  y = 45;
+  y = bandH + 7;
   const kpis = [
     ['TOTAL LANDED COST', f0(C.tot.landed), true],
     ['DUTY PAYABLE', f0(C.tot.dutyPayable), false],
@@ -612,8 +762,6 @@ function makePDF(){
     if(sub){ doc.setFont('times','italic'); doc.setFontSize(8); doc.setTextColor(...SOFT); doc.text(px(sub), W-M, y+0.6, {align:'right'}); }
     y += 6;
   };
-
-  /* one font, and header/body/footer of numeric columns all right-aligned */
   const tbl = (head, body, numCols, foot, fs)=>{
     doc.autoTable({ startY:y, margin:{left:M,right:M},
       head:[head.map(px)], body: body.map(r=>r.map(px)), foot: foot?[foot.map(px)]:undefined,
@@ -628,21 +776,18 @@ function makePDF(){
     y = doc.lastAutoTable.finalY + 8;
   };
 
-  /* 1 Consignment */
   secHead(1,'Consignment Summary');
   tbl(['Product','Qty','Unit price ('+cur()+')','Value ('+cur()+')','CBM','Share','Value (INR)'],
     C.rows.map((r,i)=>[pName(r,i), String(r.qty), f2(+r.p.price||0), f2(r.valCur), f2(r.cbm), (r.share*100).toFixed(1)+'%', f0(r.valInr)]),
     [1,2,3,4,5,6],
     ['TOTAL','','',f2(C.tot.valCur),f2(C.totCbm),'100%',f0(C.tot.valInr)]);
 
-  /* 2 Origin */
   secHead(2,'Origin Charges', exw?'EXW - freight + origin charges':'FOB - freight only');
   const orows = [['Freight charges', f2(C.frRate)+' '+cur()+' x '+f2(C.totCbm)+' CBM', f2(C.frOrig), f0(C.frInr)]];
   if(exw) orows.push(['Origin clearance charges', occLabel(C.totCbm), f2(C.occOrig), f0(C.occInr)]);
   tbl(['Charge','Basis',cur(),'INR'], orows, [2,3],
     ['TOTAL ORIGIN CHARGES','', f2(C.frOrig+C.occOrig), f0(C.frInr+C.occInr)]);
 
-  /* 3 Duty */
   secHead(3,'Assessment Value & Duty', 'AV = '+(exw?'EXW + Freight + Origin charges':'FOB + Freight'));
   tbl(['Product','Assessment value','Duty %','Duty','AV + Duty','IGST '+f2(S.gstPct)+'%','Duty payable'],
     C.rows.map((r,i)=>[pName(r,i), f0(r.av), f2(r.dpct)+'%', f0(r.duty), f0(r.gstBase), f0(r.gst), f0(r.dutyPayable)]),
@@ -652,7 +797,6 @@ function makePDF(){
   doc.text('Duty payable = Basic duty + IGST. IGST is shown separately and is NOT included in the landed cost.', M, y-4);
   y += 6;
 
-  /* 4 Destination */
   secHead(4,'Destination Clearance Charges');
   tbl(['Charge','Basis','INR'],
     [['LCL charges', f0(R.lcl)+' x '+f2(C.totCbm)+' CBM', f0(C.d.lcl)],
@@ -663,7 +807,6 @@ function makePDF(){
      ['Transport charges', transLabel(C.totCbm), f0(C.d.trans)]],
     [2], ['TOTAL DESTINATION CHARGES','', f0(C.d.total)]);
 
-  /* 5 Landed cost */
   secHead(5,'Product Landed Cost', (exw?'EXW + Origin chg + Freight + Duty + Destination':'FOB + Freight + Duty + Destination')+' - GST excluded');
   const lHead = exw ? ['Product','Goods value','Freight','Origin chg.','Duty','Destination','Landed cost','Per unit']
                     : ['Product','Goods value','Freight','Duty','Destination','Landed cost','Per unit'];
@@ -681,13 +824,22 @@ function makePDF(){
   doc.text('TOTAL LANDED COST    INR '+f0(C.tot.landed), M+5, y+2.6);
   y += 15;
 
-  /* 6 Offer */
   secHead(6,'Offer & Discount', 'Profit measured against landed cost');
   tbl(['Product','Landed','Markup','Offer 1','Profit @O1','%','Discount','Final offer','Profit @Final','%'],
     C.rows.map((r,i)=>[pName(r,i), f0(r.landed), f0(r.mu), f0(r.offer1), f0(r.prof1), f2(r.prof1Pct)+'%', f0(r.ds), f0(r.offer2), f0(r.prof2), f2(r.prof2Pct)+'%']),
     [1,2,3,4,5,6,7,8,9],
     ['TOTAL', f0(C.tot.landed),'', f0(C.tot.offer1), f0(C.tot.prof1), f2(C.tot.landed>0?C.tot.prof1/C.tot.landed*100:0)+'%','', f0(C.tot.offer2), f0(C.tot.prof2), f2(C.tot.landed>0?C.tot.prof2/C.tot.landed*100:0)+'%'],
     7.6);
+
+  /* Remarks */
+  if((S.remarks||'').trim()){
+    secHead(7,'Remarks');
+    doc.setFont('times','normal'); doc.setFontSize(9.5); doc.setTextColor(...INK);
+    const lines = doc.splitTextToSize(px(S.remarks), W-2*M);
+    if(y + lines.length*4.4 > 282){ doc.addPage(); y=18; }
+    doc.text(lines, M, y+1);
+    y += lines.length*4.4 + 6;
+  }
 
   /* footer */
   const pages = doc.getNumberOfPages();
@@ -705,16 +857,9 @@ function makePDF(){
    INIT
    ============================================================ */
 (function init(){
-  // "Record revision" button lives in the calculator bottom bar
-  const bar = $('calcBar');
-  const revBtn = document.createElement('button');
-  revBtn.className='ghost-btn'; revBtn.textContent='⟳ Record revision'; revBtn.onclick=recordRevision;
-  bar.insertBefore(revBtn, bar.querySelector('.pdfbtn'));
-
   $('repDate').value = S.date;
   setCountry('china');
   updateEditingChip();
-
   if(!cfgOk){ showAuth(); return; }
   sb.auth.onAuthStateChange((_e, session)=>{ session ? enterApp(session) : showAuth(); });
   $('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
