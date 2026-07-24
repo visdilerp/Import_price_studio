@@ -87,6 +87,10 @@
         <div class="fld"><label>Duty rate (consignment) %</label><input type="number" id="dutyPct" value="9" step="0.1" oninput="S.dutyPct=+this.value||0;calc()"><div class="unit">override per product if needed</div></div>
         <div class="fld"><label>GST (IGST) %</label><input type="number" id="gstPct" value="18" step="0.1" oninput="S.gstPct=+this.value||0;calc()"><div class="unit">shown separately, not in landed cost</div></div>
         <div class="fld" id="occManualWrap" style="display:none"><label>Origin charges — China EXW (USD)</label><input type="number" id="occManual" value="0" step="0.01" min="0" oninput="S.occManual=+this.value||0;calc()"><div class="unit">manual input from supplier / forwarder</div></div>
+        <div class="fld"><label>Quote / Email reference</label><input class="name-in" id="qRef" oninput="S.quoteRef=this.value"></div>
+        <div class="fld"><label>Reference date</label><input type="date" id="qDate" onchange="S.quoteDate=this.value"></div>
+        <div class="fld" style="grid-column:1/-1"><label>Remarks / comments</label><textarea id="remarks" rows="2" oninput="S.remarks=this.value"></textarea></div>
+        <div class="fld" style="grid-column:1/-1" id="qrefHistWrap"><label>Reference history</label><div id="qrefHist" class="qhist"><span class="note">No references recorded yet — history builds automatically each time you save with a new reference.</span></div></div>
       </div>
 
       <details class="rates">
@@ -165,7 +169,7 @@
 
 <div class="bar" id="calcBar">
   <span class="sum" id="barSum"></span>
-  <button class="ghost-btn" onclick="saveCalc()">💾 Save</button>
+  <button class="ghost-btn" id="saveBtn" onclick="saveCalc()">💾 Save</button>
   <button class="pdfbtn" onclick="makePDF()">Download PDF report</button>
 </div>
 
